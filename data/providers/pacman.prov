@@ -1,0 +1,130 @@
+#! /bin/bash
+
+# die MESSAGE
+# Print an error message and exit
+die() {
+    echo "ral_error: $1"
+    echo "ral_eom"
+    exit 0
+}
+
+# A provider for managing packages with apt tools
+is_suitable() {
+    type -p pacman > /dev/null && return 0 || return 1
+}
+
+describe() {
+    local suitable
+    is_suitable && suitable=true || suitable=false
+    cat <<EOF
+---
+provider:
+  type: package
+  invoke: simple
+  actions: [list, find]
+  suitable: ${suitable}
+  attributes:
+    name:
+      desc: the name of the package
+    ensure:
+      desc: what state the package should be in
+      # Our type system is not strong enough to be more precise. ensure is
+      # either one of enum[present,installed,absent,purged,held,latest] or
+      # a version number (so string might be as tightly as this can be
+      # typed anyway
+      type: string
+    platform:
+      desc: the platform (architecture) for which the package was built
+      kind: r
+EOF
+}
+
+list() {
+    echo '# simple'
+    pacman -Q | awk '{print $1}' | while read PKG; do  
+        pkginfo=$(pacman -Qi $PKG)
+        echo "name: $(echo "$pkginfo" | awk '/Name/ {print $3}')"
+        echo "ensure: $(echo "$pkginfo" | awk '/Version/ {print $3}')"
+        echo "platform: $(echo "$pkginfo" | awk '/Architecture/ {print $3}')"
+    done
+}
+
+# Determine the state of the resource with name $name
+find_state() {
+    [ -z "$name" ] && die "find: missing a name"
+
+    pkginfo=$(pacman -Qi $name)
+    is_ensure=$(echo "$pkginfo" | awk '/Version/ {print $3}')
+    is_platform=$(echo "$pkginfo" | awk '/Architecture/ {print $3}')
+
+    [ -z "$is_ensure" ] && is_ensure=absent
+}
+
+find() {
+    echo "# simple"
+    find_state
+    echo "name: $name"
+    echo "ensure: $is_ensure"
+    [ -n "$is_platform" ] && echo "platform: $is_platform"
+    return 0
+}
+
+update() {
+    echo "# simple"
+
+    case "$ensure"
+    in
+        present|installed)
+            # Check if installed
+	    local pkg=$(pacman -Q $name)
+	    rc=$?
+	    if [[ $rc == 0 ]]; then #if already installed 
+                return 0
+            fi
+
+            # Check if available
+	    local pkg=$(pacman -Ss $name | awk 'NR % 2 == 1' | awk '{print $1}' | cut -d "/" -f2 | awk '$0=="$name" {print $1}')
+            if [ -z $pkg  ]; then #if unavailable
+                die "ensure: No such package available"
+            fi
+            
+	    # Try to install
+	    local result=$(pacman -S $name --noconfirm)
+	    rc=$?
+	    if [[ $rc != 0 ]]; then #if unsuccessful installation
+                die "ensure: Error trying to install package $name"
+            fi
+
+	    # Confirm package is available now
+	    local pkg=$(pacman -Ss $name | awk 'NR % 2 == 1' | awk '{print $1}' | cut -d "/" -f2 | awk '$0=="$name" {print $1}')
+            if [ -z $pkg  ]; then #if unavailable
+                die "ensure: Error trying to install package $name"
+	    else
+		return 0 #package was installed successfully
+            fi
+        ;;
+        absent)
+            # Remove if existing
+        ;;
+        purged)
+        ;;
+        latest)
+        ;;
+        *)
+        ;;
+    esac
+    return 0
+}
+
+
+eval "$@"
+
+case "$ral_action"
+in
+    list) list;;
+    find) find;;
+    update) update;;
+    describe) describe;;
+    *)
+        die "Unknown action: $ral_action"
+esac
